@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Laverie Connectée - Maison du Maroc</title>
+    <meta name="theme-color" content="#4F46E5">
+    
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+    
+    <!-- React -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- QR Code Scanner -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        * {
+            -webkit-tap-highlight-color: transparent;
+        }
+        body { 
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+        .machine-card {
+            transition: all 0.3s ease;
+        }
+        .machine-card:hover, .machine-card:active {
+            transform: translateY(-2px);
+        }
+        .pulse-animation {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .7; }
+        }
+        .pin-input {
+            width: 60px;
+            height: 60px;
+            font-size: 24px;
+            text-align: center;
+            border: 3px solid #d1d5db;
+            border-radius: 12px;
+            font-weight: 800;
+        }
+        .pin-input:focus {
+            outline: none;
+            border-color: #4F46E5;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Configuration Firebase
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.REGION.firebasedatabase.app",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID,
+            appId: ""YOUR_APP_ID"
+        };
+
+        // Initialiser Firebase
+        let database = null;
+        let isFirebaseConfigured = false;
+        try {
+            if (!firebase.apps.length) {
+                firebase.initializeApp(firebaseConfig);
+            }
+            database = firebase.database();
+            isFirebaseConfigured = true;
+        } catch (error) {
+            console.error("Firebase non disponible:", error);
+        }
+
+        // Gestionnaire audio pour iOS
+        class AudioManager {
+            constructor() {
+                this.audioContext = null;
+                this.isPlaying = false;
+                this.currentSource = null;
+            }
+
+            async initialize() {
+                if (this.audioContext) return;
+                try {
+                    const AudioContext = window.AudioContext || window.webkitAudioContext;
+                    this.audioContext = new AudioContext();
+                    if (this.audioContext.state === 'suspended') {
+                        await this.audioContext.resume();
+                    }
+                } catch (error) {
+                    console.warn('Audio non disponible:', error);
+                }
+            }
+
+            async playBeep() {
+                if (!this.audioContext) await this.initialize();
+                if (!this.audioContext) return;
+
+                try {
+                    if (this.audioContext.state === 'suspended') {
+                        await this.audioContext.resume();
+                    }
+
+                    const oscillator = this.audioContext.createOscillator();
+                    const gainNode = this.audioContext.createGain();
+
+                    oscillator.connect(gainNode);
+                    gainNode.connect(this.audioContext.destination);
+
+                    oscillator.frequency.value = 800;
+                    oscillator.type = 'sine';
+                    gainNode.gain.setValueAtTime(0.3, this.audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.5);
+
+                    oscillator.start(this.audioContext.currentTime);
+                    oscillator.stop(this.audioContext.currentTime + 0.5);
+
+                    // Répéter 3 fois
+                    setTimeout(() => this.playBeep(), 600);
+                    setTimeout(() => this.playBeep(), 1200);
+                } catch (error) {
+                    console.warn('Erreur lecture son:', error);
+                }
+            }
+
+            stop() {
+                if (this.currentSource) {
+                    try {
+                        this.currentSource.stop();
+                    } catch (e) {}
+                    this.currentSource = null;
+                }
+                this.isPlaying = false;
+            }
+        }
+
+        const audioManager = new AudioManager();
+
+        // Utilitaires
+        const showToast = (message, type = 'info') => {
+            // Simple toast notification
+            const toast = document.createElement('div');
+            toast.className = `fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg font-semibold text-white ${
+                type === 'success' ? 'bg-green-500' : 
+                type === 'error' ? 'bg-red-500' : 
+                type === 'warning' ? 'bg-orange-500' : 'bg-blue-500'
+            }`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        };
+
+        const formatTime = (seconds) => {
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        };
+
+        const generateSessionId = () => {
+            return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        };
+
+        // Icônes
+        const WashingMachineIcon = () => (
+            <svg className="w-12 h-12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="4" y="2" width="16" height="20" rx="2" />
+                <circle cx="12" cy="13" r="5" />
+                <path d="M7 6h2M11 6h2" />
+                <path d="M12 10v6M14 13l-2-2-2 2" />
+            </svg>
+        );
+
+        const DryerIcon = () => (
+            <svg className="w-12 h-12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="4" y="2" width="16" height="20" rx="2" />
+                <circle cx="12" cy="13" r="5" />
+                <path d="M14 6h4M6 6h2" />
+                <path d="M12 10v6M10 13l2-2 2 2" />
+            </svg>
+        );
+
+        const ClockIcon = () => (
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 6v6l4 2" />
+            </svg>
+        );
+
+        const BellIcon = ({ active, onClick }) => (
+            <svg 
+                onClick={onClick}
+                className={`w-6 h-6 cursor-pointer transition-all ${active ? 'text-yellow-500' : 'text-gray-400'}`}
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2"
+            >
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+        );
+
+        // Composant Scanner QR
+        const QRScannerModal = ({ isOpen, onClose, onSuccess }) => {
+            const [error, setError] = useState('');
+            const html5QrCodeRef = useRef(null);
+            const [scanning, setScanning] = useState(false);
+
+            useEffect(() => {
+                if (!isOpen) {
+                    stopScanner();
+                    return;
+                }
+
+                audioManager.initialize().catch(() => {});
+
+                const startScanner = async () => {
+                    try {
+                        setError('');
+                        setScanning(true);
+
+                        await Html5Qrcode.getCameras();
+                        html5QrCodeRef.current = new Html5Qrcode("qr-reader");
+
+                        await html5QrCodeRef.current.start(
+                            { facingMode: "environment" },
+                            {
+                                fps: 10,
+                                qrbox: { width: 250, height: 250 },
+                                aspectRatio: 1.0
+                            },
+                            (decodedText) => {
+                                if (decodedText.toLowerCase() === 'laverie2024') {
+                                    stopScanner();
+                                    onSuccess();
+                                    showToast('✅ Accès accordé !', 'success');
+                                } else {
+                                    setError('QR Code invalide');
+                                    setTimeout(() => setError(''), 2000);
+                                }
+                            },
+                            (error) => {
+                                // Ignorer les erreurs de scan normales
+                            }
+                        );
+                    } catch (err) {
+                        console.error('Erreur scanner:', err);
+                        setError('Veuillez autoriser l\'accès à la caméra');
+                        setScanning(false);
+                    }
+                };
+
+                setTimeout(startScanner, 300);
+            }, [isOpen]);
+
+            const stopScanner = () => {
+                if (html5QrCodeRef.current && scanning) {
+                    html5QrCodeRef.current.stop().catch(() => {});
+                    html5QrCodeRef.current = null;
+                    setScanning(false);
+                }
+            };
+
+            const handleClose = () => {
+                stopScanner();
+                onClose();
+            };
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50" onClick={handleClose}>
+                    <div className="bg-white rounded-3xl p-8 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-center mb-6">
+                            <div className="text-5xl mb-4">📷</div>
+                            <h2 className="text-2xl font-bold mb-2">Scanner le QR Code</h2>
+                            <p className="text-gray-600">Positionnez le code dans le cadre</p>
+                        </div>
+
+                        {error ? (
+                            <div className="bg-red-50 border-2 border-red-300 rounded-xl p-4 text-center text-red-600 font-semibold mb-4">
+                                ❌ {error}
+                                <p className="text-sm mt-2">Réglages → Safari → Caméra → Autoriser</p>
+                            </div>
+                        ) : (
+                            <div id="qr-reader" className="rounded-xl overflow-hidden border-4 border-indigo-500 mb-4"></div>
+                        )}
+
+                        <button
+                            onClick={handleClose}
+                            className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 rounded-xl"
+                        >
+                            Annuler
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // Modal Durée
+        const DurationModal = ({ isOpen, onClose, onConfirm, machineInfo }) => {
+            const [duration, setDuration] = useState(45);
+
+            if (!isOpen || !machineInfo) return null;
+
+            const machineLabel = machineInfo.type === 'machine' ? 'Machine à laver' : 'Sèche-linge';
+            const maxDuration = machineInfo.type === 'machine' ? 60 : 90;
+
+            return (
+                <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50" onClick={onClose}>
+                    <div className="bg-white rounded-3xl p-8 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-center mb-6">
+                            <div className="text-5xl mb-4">⏱️</div>
+                            <h2 className="text-2xl font-bold mb-2">Durée du cycle</h2>
+                            <p className="text-gray-600">{machineLabel} {machineInfo.id}</p>
+                        </div>
+
+                        <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl p-6 mb-6">
+                            <div className="text-5xl font-black text-indigo-600 text-center mb-4">
+                                {duration} min
+                            </div>
+                            <input
+                                type="range"
+                                min="15"
+                                max={maxDuration}
+                                value={duration}
+                                onChange={(e) => setDuration(parseInt(e.target.value))}
+                                className="w-full h-3 bg-gradient-to-r from-green-400 via-blue-400 to-red-400 rounded-lg appearance-none cursor-pointer"
+                            />
+                            <div className="flex justify-between text-sm text-gray-600 mt-2">
+                                <span>15 min</span>
+                                <span>{maxDuration} min</span>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={() => onConfirm(duration)}
+                            className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-4 rounded-xl mb-2"
+                        >
+                            ✅ Continuer
+                        </button>
+                        <button
+                            onClick={onClose}
+                            className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 rounded-xl"
+                        >
+                            Annuler
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // Modal PIN Setup
+        const PinSetupModal = ({ isOpen, onClose, onConfirm, machineInfo, duration }) => {
+            const [pin, setPin] = useState(['', '', '', '']);
+            const [confirmPin, setConfirmPin] = useState(['', '', '', '']);
+            const [step, setStep] = useState(1);
+            const [error, setError] = useState('');
+            const inputRefs = [useRef(), useRef(), useRef(), useRef()];
+            const confirmInputRefs = [useRef(), useRef(), useRef(), useRef()];
+
+            useEffect(() => {
+                if (isOpen && step === 1) {
+                    setTimeout(() => inputRefs[0].current?.focus(), 100);
+                }
+            }, [isOpen, step]);
+
+            const handlePinChange = (index, value, isConfirm = false) => {
+                const refs = isConfirm ? confirmInputRefs : inputRefs;
+                const currentPin = isConfirm ? confirmPin : pin;
+                const setCurrentPin = isConfirm ? setConfirmPin : setPin;
+
+                if (value.length > 1) value = value[0];
+                if (!/^\d*$/.test(value)) return;
+
+                const newPin = [...currentPin];
+                newPin[index] = value;
+                setCurrentPin(newPin);
+
+                if (value && index < 3) {
+                    refs[index + 1].current?.focus();
+                }
+
+                if (index === 3 && value) {
+                    if (!isConfirm) {
+                        setStep(2);
+                        setTimeout(() => confirmInputRefs[0].current?.focus(), 100);
+                    } else {
+                        const pinStr = pin.join('');
+                        const confirmStr = newPin.join('');
+                        if (pinStr === confirmStr) {
+                            onConfirm(pinStr);
+                        } else {
+                            setError('Les codes ne correspondent pas');
+                            setTimeout(() => {
+                                setPin(['', '', '', '']);
+                                setConfirmPin(['', '', '', '']);
+                                setStep(1);
+                                setError('');
+                                inputRefs[0].current?.focus();
+                            }, 1500);
+                        }
+                    }
+                }
+            };
+
+            const handleKeyDown = (index, e, isConfirm = false) => {
+                const refs = isConfirm ? confirmInputRefs : inputRefs;
+                const currentPin = isConfirm ? confirmPin : pin;
+                const setCurrentPin = isConfirm ? setConfirmPin : setPin;
+
+                if (e.key === 'Backspace' && !currentPin[index] && index > 0) {
+                    const newPin = [...currentPin];
+                    newPin[index - 1] = '';
+                    setCurrentPin(newPin);
+                    refs[index - 1].current?.focus();
+                }
+            };
+
+            const handleReset = () => {
+                setPin(['', '', '', '']);
+                setConfirmPin(['', '', '', '']);
+                setStep(1);
+                setError('');
+                onClose();
+            };
+
+            if (!isOpen || !machineInfo) return null;
+
+            const machineLabel = machineInfo.type === 'machine' ? 'Machine à laver' : 'Sèche-linge';
+
+            return (
+                <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50" onClick={handleReset}>
+                    <div className="bg-white rounded-3xl p-8 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-center mb-6">
+                            <div className="text-5xl mb-4">🔐</div>
+                            <h2 className="text-2xl font-bold mb-2">
+                                {step === 1 ? 'Créer un code PIN' : 'Confirmer le code'}
+                            </h2>
+                            <p className="text-gray-600">{machineLabel} {machineInfo.id} - {duration} min</p>
+                            <p className="text-sm text-gray-500 mt-2">
+                                {step === 1 ? 'Pour annuler votre cycle' : 'Saisissez à nouveau le code'}
+                            </p>
+                        </div>
+
+                        <div className="flex justify-center gap-3 mb-6">
+                            {(step === 1 ? pin : confirmPin).map((digit, index) => (
+                                <input
+                                    key={index}
+                                    ref={step === 1 ? inputRefs[index] : confirmInputRefs[index]}
+                                    type="number"
+                                    inputMode="numeric"
+                                    maxLength="1"
+                                    value={digit}
+                                    onChange={(e) => handlePinChange(index, e.target.value, step === 2)}
+                                    onKeyDown={(e) => handleKeyDown(index, e, step === 2)}
+                                    className="pin-input"
+                                />
+                            ))}
+                        </div>
+
+                        {error && (
+                            <div className="text-center text-red-600 font-bold mb-4">
+                                ❌ {error}
+                            </div>
+                        )}
+
+                        {step === 1 && (
+                            <button
+                                onClick={handleReset}
+                                className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 rounded-xl"
+                            >
+                                Annuler
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // Modal Annulation
+        const CancelModal = ({ isOpen, onClose, onConfirm, machine }) => {
+            const [pin, setPin] = useState(['', '', '', '']);
+            const [error, setError] = useState('');
+            const inputRefs = [useRef(), useRef(), useRef(), useRef()];
+
+            useEffect(() => {
+                if (isOpen) {
+                    setPin(['', '', '', '']);
+                    setError('');
+                    setTimeout(() => inputRefs[0].current?.focus(), 100);
+                }
+            }, [isOpen]);
+
+            const handlePinChange = (index, value) => {
+                if (value.length > 1) value = value[0];
+                if (!/^\d*$/.test(value)) return;
+
+                const newPin = [...pin];
+                newPin[index] = value;
+                setPin(newPin);
+
+                if (value && index < 3) {
+                    inputRefs[index + 1].current?.focus();
+                }
+
+                if (index === 3 && value) {
+                    const enteredPin = newPin.join('');
+                    if (enteredPin === machine.pin) {
+                        onConfirm();
+                    } else {
+                        setError('Code PIN incorrect');
+                        setTimeout(() => {
+                            setPin(['', '', '', '']);
+                            setError('');
+                            inputRefs[0].current?.focus();
+                        }, 1500);
+                    }
+                }
+            };
+
+            const handleKeyDown = (index, e) => {
+                if (e.key === 'Backspace' && !pin[index] && index > 0) {
+                    const newPin = [...pin];
+                    newPin[index - 1] = '';
+                    setPin(newPin);
+                    inputRefs[index - 1].current?.focus();
+                }
+            };
+
+            if (!isOpen || !machine) return null;
+
+            const machineLabel = machine.type === 'machine' ? 'Machine' : 'Sèche-linge';
+
+            return (
+                <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50" onClick={onClose}>
+                    <div className="bg-white rounded-3xl p-8 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-center mb-6">
+                            <div className="text-5xl mb-4">⚠️</div>
+                            <h2 className="text-2xl font-bold mb-2">Annuler le cycle</h2>
+                            <p className="text-gray-600">{machineLabel} {machine.id}</p>
+                            <p className="text-sm text-gray-500 mt-2">Temps restant : {formatTime(machine.timeLeft)}</p>
+                        </div>
+
+                        <div className="flex justify-center gap-3 mb-6">
+                            {pin.map((digit, index) => (
+                                <input
+                                    key={index}
+                                    ref={inputRefs[index]}
+                                    type="number"
+                                    inputMode="numeric"
+                                    maxLength="1"
+                                    value={digit}
+                                    onChange={(e) => handlePinChange(index, e.target.value)}
+                                    onKeyDown={(e) => handleKeyDown(index, e)}
+                                    className="pin-input"
+                                />
+                            ))}
+                        </div>
+
+                        {error && (
+                            <div className="text-center text-red-600 font-bold mb-4">
+                                ❌ {error}
+                            </div>
+                        )}
+
+                        <button
+                            onClick={onClose}
+                            className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 rounded-xl"
+                        >
+                            Retour
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // Composant Machine
+        const Machine = ({ id, type, status, timeLeft, sessionId: machineSessionId, pin, hasAccess, onStart, onCancel, currentSessionId, notificationEnabled, onToggleNotification }) => {
+            const isRunning = status === 'occupé';
+            const isOwner = machineSessionId === currentSessionId;
+            const canCancel = isRunning && isOwner;
+            
+            const bgColor = isRunning 
+                ? (isOwner ? 'bg-orange-50 border-orange-300' : 'bg-blue-50 border-blue-300')
+                : 'bg-green-50 border-green-300';
+            
+            const textColor = isRunning 
+                ? (isOwner ? 'text-orange-700' : 'text-blue-700')
+                : 'text-green-700';
+            
+            const iconColor = isRunning 
+                ? (isOwner ? 'text-orange-600' : 'text-blue-600')
+                : 'text-green-600';
+
+            return (
+                <div className={`machine-card ${bgColor} border-2 rounded-xl p-6 shadow-lg`}>
+                    <div className="flex items-center justify-between mb-4">
+                        <div className={iconColor}>
+                            {type === 'machine' ? <WashingMachineIcon /> : <DryerIcon />}
+                        </div>
+                        <span className={`text-sm font-semibold px-3 py-1 rounded-full ${
+                            isRunning 
+                                ? (isOwner ? 'bg-orange-200 text-orange-800' : 'bg-blue-200 text-blue-800')
+                                : 'bg-green-200 text-green-800'
+                        }`}>
+                            {isRunning ? (isOwner ? 'VOTRE CYCLE' : 'OCCUPÉ') : 'LIBRE'}
+                        </span>
+                    </div>
+
+                    <h3 className={`text-xl font-bold ${textColor} mb-2`}>
+                        {type === 'machine' ? 'Machine' : 'Sèche-linge'} {id}
+                    </h3>
+
+                    {isRunning ? (
+                        <div className="space-y-4">
+                            <div className="flex items-center justify-between bg-white rounded-lg p-3">
+                                <div className="flex items-center gap-2 text-gray-600">
+                                    <ClockIcon />
+                                    <span className="font-medium">Temps restant</span>
+                                </div>
+                                <div className={`text-2xl font-bold ${textColor}`}>
+                                    {formatTime(timeLeft)}
+                                </div>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                                {isOwner && (
+                                    <button
+                                        onClick={() => onToggleNotification(type, id)}
+                                        className="flex items-center gap-2 text-sm font-semibold text-gray-600 hover:text-gray-800"
+                                    >
+                                        <BellIcon active={notificationEnabled} />
+                                        {notificationEnabled ? 'Notif. ON' : 'Notif. OFF'}
+                                    </button>
+                                )}
+                                {canCancel && (
+                                    <button
+                                        onClick={() => onCancel({ id, type, timeLeft, pin, sessionId: machineSessionId })}
+                                        className="flex-1 ml-2 bg-red-500 hover:bg-red-600 text-white font-bold py-2 rounded-lg"
+                                    >
+                                        ⏹️ Annuler
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ) : (
+                        hasAccess && (
+                            <button
+                                onClick={() => onStart({ id, type })}
+                                className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-3 rounded-lg"
+                            >
+                                ▶️ Démarrer
+                            </button>
+                        )
+                    )}
+                </div>
+            );
+        };
+
+        // Application principale
+        const App = () => {
+            console.log('🚀 Initialisation de l\'App');
+            
+            const initialMachines = [
+                { id: 1, type: 'machine', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+                { id: 2, type: 'machine', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+                { id: 3, type: 'machine', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+                { id: 1, type: 'dryer', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+                { id: 2, type: 'dryer', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+                { id: 3, type: 'dryer', status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null },
+            ];
+
+            const [machines, setMachines] = useState(initialMachines);
+            const [loading, setLoading] = useState(true);
+            const [hasAccess, setHasAccess] = useState(false);
+            const [accessTimeLeft, setAccessTimeLeft] = useState(0);
+            const [sessionId] = useState(() => {
+                // Restaurer ou créer un sessionId persistant
+                let storedSessionId = localStorage.getItem('userSessionId');
+                if (!storedSessionId) {
+                    storedSessionId = generateSessionId();
+                    localStorage.setItem('userSessionId', storedSessionId);
+                    console.log('🆕 Nouveau sessionId créé:', storedSessionId);
+                } else {
+                    console.log('🔑 SessionId restauré:', storedSessionId);
+                }
+                return storedSessionId;
+            });
+            const [qrModalOpen, setQrModalOpen] = useState(false);
+            const [durationModalOpen, setDurationModalOpen] = useState(false);
+            const [pinSetupModalOpen, setPinSetupModalOpen] = useState(false);
+            const [cancelModalOpen, setCancelModalOpen] = useState(false);
+            const [selectedMachine, setSelectedMachine] = useState(null);
+            const [pendingDuration, setPendingDuration] = useState(null);
+            const [machineNotifications, setMachineNotifications] = useState({});
+
+            // Charger l'état initial
+            useEffect(() => {
+                if (database) {
+                    // Charger une seule fois depuis Firebase au lieu d'écouter en continu
+                    // Cela évite les conflits avec le timer local
+                    database.ref('machines').once('value', (snapshot) => {
+                        const data = snapshot.val();
+                        if (data) {
+                            console.log('📥 Machines chargées depuis Firebase');
+                            setMachines(data);
+                        }
+                        setLoading(false);
+                    });
+
+                    // Cleanup si nécessaire
+                    return () => {
+                        // Plus de listener continu, donc pas besoin de cleanup
+                    };
+                } else {
+                    const stored = localStorage.getItem('laundryMachines');
+                    if (stored) {
+                        console.log('📥 Machines chargées depuis localStorage');
+                        setMachines(JSON.parse(stored));
+                    }
+                    setLoading(false);
+                }
+
+                // Charger l'accès - Fix: Charger le temps AVANT d'activer hasAccess
+                const savedAccess = localStorage.getItem('hasAccess');
+                const savedAccessTime = localStorage.getItem('accessTimeLeft');
+                console.log('📥 Chargement accès - savedAccess:', savedAccess, 'savedAccessTime:', savedAccessTime);
+                
+                if (savedAccess === 'true' && savedAccessTime) {
+                    const timeLeft = parseInt(savedAccessTime);
+                    console.log('📥 Temps parsé:', timeLeft);
+                    
+                    if (timeLeft > 0) {
+                        console.log('🔑 Restauration accès avec', timeLeft, 'secondes');
+                        setAccessTimeLeft(timeLeft); // D'abord le temps
+                        setHasAccess(true); // Puis l'accès - le timer se déclenchera avec le bon temps
+                        console.log('✅ Accès restauré');
+                    } else {
+                        console.log('⚠️ Temps <= 0, pas de restauration');
+                    }
+                } else {
+                    console.log('ℹ️ Pas d\'accès sauvegardé');
+                }
+
+                // Charger les notifications
+                const savedNotifications = localStorage.getItem('machineNotifications');
+                if (savedNotifications) {
+                    setMachineNotifications(JSON.parse(savedNotifications));
+                }
+
+                // Charger et afficher le sessionId pour debug
+                const storedSessionId = localStorage.getItem('userSessionId');
+                console.log('🔑 SessionId de cet appareil:', storedSessionId);
+            }, []);
+
+            // Sauvegarder l'état d'accès
+            useEffect(() => {
+                localStorage.setItem('hasAccess', hasAccess.toString());
+                localStorage.setItem('accessTimeLeft', accessTimeLeft.toString());
+            }, [hasAccess, accessTimeLeft]);
+
+            // Sauvegarder les notifications
+            useEffect(() => {
+                localStorage.setItem('machineNotifications', JSON.stringify(machineNotifications));
+            }, [machineNotifications]);
+
+            // Utiliser des refs pour garder les valeurs à jour sans recréer l'interval
+            const machinesRef = useRef(machines);
+            const notificationsRef = useRef(machineNotifications);
+
+            useEffect(() => {
+                machinesRef.current = machines;
+            }, [machines]);
+
+            useEffect(() => {
+                notificationsRef.current = machineNotifications;
+            }, [machineNotifications]);
+
+            // Timer d'accès - Nouveau: Timer permanent avec refs pour lire les valeurs actuelles
+            const hasAccessRef = useRef(hasAccess);
+            const accessTimeLeftRef = useRef(accessTimeLeft);
+
+            // Mettre à jour les refs quand les states changent
+            useEffect(() => {
+                hasAccessRef.current = hasAccess;
+                accessTimeLeftRef.current = accessTimeLeft;
+                console.log('📊 État mis à jour - hasAccess:', hasAccess, 'timeLeft:', accessTimeLeft);
+            }, [hasAccess, accessTimeLeft]);
+
+            // Timer d'accès - Version simplifiée
+            useEffect(() => {
+                console.log('⏰ useEffect du timer appelé');
+                console.log('⏰ État actuel - hasAccess:', hasAccess, 'accessTimeLeft:', accessTimeLeft);
+                
+                const interval = setInterval(() => {
+                    // Lire les valeurs des refs
+                    const currentHasAccess = hasAccessRef.current;
+                    const currentTimeLeft = accessTimeLeftRef.current;
+                    
+                    console.log('⏰ Tick - hasAccess:', currentHasAccess, 'timeLeft:', currentTimeLeft);
+                    
+                    // Si pas d'accès, ne rien faire
+                    if (!currentHasAccess) {
+                        return;
+                    }
+                    
+                    // Si plus de temps, désactiver l'accès
+                    if (currentTimeLeft <= 0) {
+                        console.log('⏰ Temps écoulé');
+                        setHasAccess(false);
+                        showToast('⏰ Votre accès a expiré', 'warning');
+                        return;
+                    }
+                    
+                    // Décrémenter le temps
+                    const newTime = currentTimeLeft - 1;
+                    console.log('⏰ Nouveau temps:', newTime);
+                    setAccessTimeLeft(newTime);
+                    
+                    // Si on atteint 0, désactiver l'accès
+                    if (newTime <= 0) {
+                        console.log('⏰ Fin du compte à rebours');
+                        setHasAccess(false);
+                        showToast('⏰ Votre accès a expiré', 'warning');
+                    }
+                }, 1000);
+
+                return () => {
+                    console.log('⏰ Nettoyage du timer');
+                    clearInterval(interval);
+                };
+            }, []); // Aucune dépendance
+
+            // Timer machines - Utilise les refs pour éviter les recréations
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    // Lire depuis la ref pour avoir l'état le plus à jour
+                    const currentMachines = machinesRef.current;
+                    
+                    let hasChanges = false;
+                    const updatedMachines = currentMachines.map(machine => {
+                        if (machine.status === 'occupé' && machine.endTime) {
+                            const remaining = Math.max(0, Math.ceil((machine.endTime - Date.now()) / 1000));
+                            
+                            if (remaining === 0 && machine.timeLeft > 0) {
+                                hasChanges = true;
+                                
+                                // Notification
+                                const machineKey = `${machine.type}-${machine.id}`;
+                                if (notificationsRef.current[machineKey]) {
+                                    const label = machine.type === 'machine' ? 'Machine' : 'Sèche-linge';
+                                    showToast(`${label} ${machine.id} terminée !`, 'success');
+                                    audioManager.playBeep();
+                                }
+
+                                return { ...machine, status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null };
+                            }
+                            if (remaining !== machine.timeLeft) {
+                                hasChanges = true;
+                                return { ...machine, timeLeft: remaining };
+                            }
+                        }
+                        return machine;
+                    });
+
+                    if (hasChanges) {
+                        // Mettre à jour la ref d'abord
+                        machinesRef.current = updatedMachines;
+                        
+                        // Puis le state
+                        setMachines(updatedMachines);
+                        
+                        // Et sauvegarder
+                        if (database) {
+                            database.ref('machines').set(updatedMachines);
+                        } else {
+                            localStorage.setItem('laundryMachines', JSON.stringify(updatedMachines));
+                        }
+                    }
+                }, 1000);
+
+                return () => clearInterval(interval);
+            }, []); // Pas de dépendances - utilise les refs
+
+            const handleQRSuccess = () => {
+                setHasAccess(true);
+                setAccessTimeLeft(30 * 60); // 30 minutes
+                setQrModalOpen(false);
+                showToast('✅ Accès accordé pour 30 minutes !', 'success');
+            };
+
+            const handleStartMachine = (machineInfo) => {
+                setSelectedMachine(machineInfo);
+                setDurationModalOpen(true);
+            };
+
+            const handleConfirmDuration = (duration) => {
+                setPendingDuration(duration);
+                setDurationModalOpen(false);
+                setPinSetupModalOpen(true);
+            };
+
+            const handleConfirmPin = (pin) => {
+                const { id, type } = selectedMachine;
+                const endTime = Date.now() + (pendingDuration * 60000);
+
+                console.log('🚀 Démarrage machine:', {
+                    machineId: `${type}-${id}`,
+                    sessionId: sessionId,
+                    pin: pin,
+                    duration: pendingDuration
+                });
+
+                const updatedMachines = machines.map(machine =>
+                    machine.id === id && machine.type === type
+                        ? { 
+                            ...machine, 
+                            status: 'occupé', 
+                            timeLeft: pendingDuration * 60, 
+                            endTime, 
+                            pin, 
+                            sessionId  // Bien sauvegarder le sessionId
+                        }
+                        : machine
+                );
+
+                // CRITIQUE: Mettre à jour la ref AVANT le state
+                machinesRef.current = updatedMachines;
+
+                setMachines(updatedMachines);
+
+                if (database) {
+                    database.ref('machines').set(updatedMachines).then(() => {
+                        console.log('✅ Démarrage sauvegardé dans Firebase');
+                    });
+                } else {
+                    localStorage.setItem('laundryMachines', JSON.stringify(updatedMachines));
+                    console.log('✅ Démarrage sauvegardé dans localStorage');
+                }
+
+                showToast(`✅ ${type === 'machine' ? 'Machine' : 'Sèche-linge'} ${id} démarrée !`, 'success');
+                setPinSetupModalOpen(false);
+                setSelectedMachine(null);
+            };
+
+            const handleCancelMachine = (machine) => {
+                setSelectedMachine(machine);
+                setCancelModalOpen(true);
+            };
+
+            const handleConfirmCancel = () => {
+                const { id, type } = selectedMachine;
+
+                const updatedMachines = machines.map(machine =>
+                    machine.id === id && machine.type === type
+                        ? { ...machine, status: 'libre', timeLeft: 0, endTime: null, pin: null, sessionId: null }
+                        : machine
+                );
+
+                // CRITIQUE: Mettre à jour la ref AVANT le state pour éviter que le timer écrase
+                machinesRef.current = updatedMachines;
+
+                // Mettre à jour l'état local
+                setMachines(updatedMachines);
+
+                // Sauvegarder dans Firebase ou localStorage
+                if (database) {
+                    database.ref('machines').set(updatedMachines).then(() => {
+                        console.log('✅ Annulation sauvegardée dans Firebase');
+                    });
+                } else {
+                    localStorage.setItem('laundryMachines', JSON.stringify(updatedMachines));
+                    console.log('✅ Annulation sauvegardée dans localStorage');
+                }
+
+                showToast(`✅ ${type === 'machine' ? 'Machine' : 'Sèche-linge'} ${id} annulée`, 'info');
+                setCancelModalOpen(false);
+                setSelectedMachine(null);
+            };
+
+            const toggleMachineNotification = (type, id) => {
+                const key = `${type}-${id}`;
+                setMachineNotifications(prev => ({
+                    ...prev,
+                    [key]: !prev[key]
+                }));
+                showToast(!machineNotifications[key] ? '🔔 Notifications activées' : '🔕 Notifications désactivées', 'info');
+            };
+
+            if (loading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center">
+                        <div className="text-white text-2xl font-bold">Chargement...</div>
+                    </div>
+                );
+            }
+
+            const washingMachines = machines.filter(m => m.type === 'machine');
+            const dryers = machines.filter(m => m.type === 'dryer');
+            const availableWashers = washingMachines.filter(m => m.status === 'libre').length;
+            const availableDryers = dryers.filter(m => m.status === 'libre').length;
+
+            return (
+                <div className="min-h-screen py-8 px-4">
+                    <div className="max-w-6xl mx-auto">
+                        {/* En-tête */}
+                        <div className="bg-white rounded-2xl shadow-xl p-6 mb-8">
+                            <div className="flex items-center justify-between mb-4">
+                                <h1 className="text-3xl font-bold text-gray-800">🧺 Laverie Connectée</h1>
+                                {isFirebaseConfigured && (
+                                    <span className="text-xs bg-green-100 text-green-700 px-3 py-1 rounded-full font-semibold">
+                                        🔄 Temps réel
+                                    </span>
+                                )}
+                            </div>
+                            
+                            <p className="text-gray-600 mb-4">Maison du Maroc - Cité Universitaire</p>
+
+                            {/* Badge accès */}
+                            {hasAccess ? (
+                                <div className="bg-green-50 border-2 border-green-300 rounded-xl p-4 mb-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <div className="font-bold text-green-700">✅ Mode Action</div>
+                                            <div className="text-sm text-green-600">Vous pouvez démarrer les machines</div>
+                                        </div>
+                                        <div className="text-2xl font-bold text-green-700">
+                                            {formatTime(accessTimeLeft)}
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="bg-blue-50 border-2 border-blue-300 rounded-xl p-4 mb-4">
+                                    <div className="flex items-center justify-between gap-4">
+                                        <div>
+                                            <div className="font-bold text-blue-700">👁️ Mode Consultation</div>
+                                            <div className="text-sm text-blue-600">Consultez l'état des machines</div>
+                                        </div>
+                                        <button
+                                            onClick={() => setQrModalOpen(true)}
+                                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl whitespace-nowrap"
+                                        >
+                                            📷 Scanner QR
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Stats */}
+                            <div className="flex gap-4">
+                                <div className="flex-1 bg-green-50 rounded-lg p-4 border-2 border-green-200">
+                                    <div className="text-3xl font-bold text-green-700">{availableWashers}/3</div>
+                                    <div className="text-sm text-green-600 font-medium">Machines libres</div>
+                                </div>
+                                <div className="flex-1 bg-blue-50 rounded-lg p-4 border-2 border-blue-200">
+                                    <div className="text-3xl font-bold text-blue-700">{availableDryers}/3</div>
+                                    <div className="text-sm text-blue-600 font-medium">Sèche-linges libres</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Machines à laver */}
+                        <div className="mb-8">
+                            <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                                🌀 Machines à laver
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {washingMachines.map(machine => (
+                                    <Machine
+                                        key={`machine-${machine.id}`}
+                                        {...machine}
+                                        hasAccess={hasAccess}
+                                        onStart={handleStartMachine}
+                                        onCancel={handleCancelMachine}
+                                        currentSessionId={sessionId}
+                                        notificationEnabled={machineNotifications[`${machine.type}-${machine.id}`] || false}
+                                        onToggleNotification={toggleMachineNotification}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Sèche-linges */}
+                        <div>
+                            <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                                💨 Sèche-linges
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {dryers.map(machine => (
+                                    <Machine
+                                        key={`dryer-${machine.id}`}
+                                        {...machine}
+                                        hasAccess={hasAccess}
+                                        onStart={handleStartMachine}
+                                        onCancel={handleCancelMachine}
+                                        currentSessionId={sessionId}
+                                        notificationEnabled={machineNotifications[`${machine.type}-${machine.id}`] || false}
+                                        onToggleNotification={toggleMachineNotification}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="mt-8 text-center text-white text-sm opacity-75">
+                            <p>✨ Fait avec soin pour la Maison du Maroc ✨</p>
+                            <p className="mt-2">💡 Cliquez sur les cloches 🔔 pour recevoir des alertes</p>
+                        </div>
+                    </div>
+
+                    {/* Modals */}
+                    <QRScannerModal
+                        isOpen={qrModalOpen}
+                        onClose={() => setQrModalOpen(false)}
+                        onSuccess={handleQRSuccess}
+                    />
+
+                    <DurationModal
+                        isOpen={durationModalOpen}
+                        onClose={() => setDurationModalOpen(false)}
+                        onConfirm={handleConfirmDuration}
+                        machineInfo={selectedMachine}
+                    />
+
+                    <PinSetupModal
+                        isOpen={pinSetupModalOpen}
+                        onClose={() => setPinSetupModalOpen(false)}
+                        onConfirm={handleConfirmPin}
+                        machineInfo={selectedMachine}
+                        duration={pendingDuration}
+                    />
+
+                    <CancelModal
+                        isOpen={cancelModalOpen}
+                        onClose={() => setCancelModalOpen(false)}
+                        onConfirm={handleConfirmCancel}
+                        machine={selectedMachine}
+                    />
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
